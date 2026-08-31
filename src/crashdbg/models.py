@@ -124,12 +124,25 @@ class BacktraceFrame:
 
 
 @dataclass
+class NetworkInterface:
+    name: str
+    flags: list[str] = field(default_factory=list)
+    addresses: list[str] = field(default_factory=list)
+
+    @property
+    def is_point_to_point(self) -> bool:
+        return "POINTOPOINT" in self.flags
+
+
+@dataclass
 class AnalysisReport:
     coredump: CoredumpInfo
     kernel_fault: KernelFault | None = None
     disasm: list[DisasmInstr] = field(default_factory=list)
     recent_calls: list[ImportedCall] = field(default_factory=list)
     crash_function: CrashFunction | None = None
+    network_interfaces: list[NetworkInterface] = field(default_factory=list)
+    network_capture_reason: str | None = None
     backtrace: list[BacktraceFrame] = field(default_factory=list)
     backtrace_source: str = "none"  # "gdb" | "coredump-message" | "none"
     journal_context: list[str] = field(default_factory=list)

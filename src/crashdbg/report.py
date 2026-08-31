@@ -157,6 +157,26 @@ def _crash_function_table(report: AnalysisReport) -> Table | None:
     return table
 
 
+def _network_table(report: AnalysisReport) -> Table | None:
+    if not report.network_interfaces:
+        return None
+    table = Table(
+        title=f"Live Network Interfaces (captured: crash involved {report.network_capture_reason}())"
+    )
+    table.add_column("Interface")
+    table.add_column("Flags")
+    table.add_column("Addresses")
+    for iface in report.network_interfaces:
+        style = "yellow bold" if iface.is_point_to_point else None
+        name = iface.name + ("  [POINTOPOINT]" if iface.is_point_to_point else "")
+        table.add_row(
+            Text(name, style=style),
+            Text(",".join(iface.flags), style=style),
+            Text("\n".join(iface.addresses), style=style),
+        )
+    return table
+
+
 def _backtrace_table(report: AnalysisReport) -> Table:
     table = Table(title=f"Backtrace (source: {report.backtrace_source})")
     table.add_column("#", justify="right")
@@ -204,6 +224,10 @@ def render(report: AnalysisReport, console: Console) -> None:
     calls_panel = _recent_calls_panel(report)
     if calls_panel:
         console.print(calls_panel)
+
+    network_table = _network_table(report)
+    if network_table:
+        console.print(network_table)
 
     if report.backtrace:
         console.print(_backtrace_table(report))

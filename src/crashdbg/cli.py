@@ -12,9 +12,13 @@ Pipeline (mirrors manual coredumpctl + journalctl + gdb triage):
   6. scan backward from the fault for the nearest *imported* library call
      objdump can resolve via the binary's PLT/dynamic symbol table - this
      survives stripping, unlike .symtab, so it works with no debug info
-  7. get a symbolized backtrace via gdb (falling back to coredumpctl's own
+  7. if the nearest resolved call is a network-interface-enumeration
+     function (getifaddrs & family), snapshot live interface state and
+     flag anything with the POINTOPOINT flag - the documented condition
+     under which the kernel returns a NULL ifa_addr, a common crash cause
+  8. get a symbolized backtrace via gdb (falling back to coredumpctl's own
      embedded address-only backtrace if gdb/zstd are unavailable)
-  8. render a report
+  9. render a report
 
 No step assumes anything about which application crashed or why.
 """
@@ -27,7 +31,17 @@ from typing import Annotated
 import typer
 from rich.console import Console
 
-from . import backtrace, coredump, elf, functions, imports, journal, objdump_disasm, report
+from . import (
+    backtrace,
+    coredump,
+    elf,
+    functions,
+    imports,
+    journal,
+    netstate,
+    objdump_disasm,
+    report,
+)
 from .disasm import disassemble_fault, parse_code_line
 from .models import AnalysisReport, CrashFunction
 
@@ -270,6 +284,30 @@ def analyze_cmd(
                 )
         else:
             rpt.notes.append("objdump not found on PATH; skipped nearest-import-call scan.")
+
+    # --- network-interface state, only if the crash involved that API ----
+    matched_fn = next(
+        (c.symbol for c in rpt.recent_calls if c.symbol in netstate.INTERFACE_ENUM_FUNCTIONS),
+        None,
+    )
+    if matched_fn is not None:
+        if netstate.available():
+            with console.status("Capturing live network interface state...", spinner="dots"):
+                rpt.network_interfaces = netstate.capture_interfaces()
+            rpt.network_capture_reason = matched_fn
+            rpt.commands_used.append("ip -j addr show")
+            if any(i.is_point_to_point for i in rpt.network_interfaces):
+                rpt.notes.append(
+                    f"The crash involved {matched_fn}(), and a POINTOPOINT interface is "
+                    "currently up (see 'Live Network Interfaces' below). The kernel legitimately "
+                    "returns a NULL ifa_addr for such interfaces' AF_PACKET entry, which is a "
+                    "well-known source of NULL-deref crashes in callers that don't check for it."
+                )
+        else:
+            rpt.notes.append(
+                f"The crash involved {matched_fn}(), but 'ip' is not on PATH; "
+                "skipped live network-interface capture."
+            )
 
     # --- journal context ----------------------------------------------
     if journal.available():
