@@ -30,6 +30,12 @@ def _run_json(args: list[str]) -> str:
         check=False,
     )
     if proc.returncode != 0:
+        # coredumpctl exits 1 (not 0) when a match expression finds nothing -
+        # that's a legitimate empty result, not a real failure, so callers
+        # (list_coredumps) can treat it the same as "zero rows" rather than
+        # an exception.
+        if "No coredumps found" in proc.stderr:
+            return ""
         raise CoredumpctlError(
             f"coredumpctl {' '.join(args)} failed (exit {proc.returncode}): "
             f"{proc.stderr.strip() or proc.stdout.strip()}"

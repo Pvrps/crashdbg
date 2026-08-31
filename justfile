@@ -26,6 +26,13 @@ install:
 test:
     devenv shell -- uv run pytest
 
-# Run crashdbg, e.g. `just run analyze` or `just run list`
+# Launch crashdbg's interactive TUI (the default experience). Args are a
+# coredumpctl match expression (PID/COMM/EXE), NOT a subcommand - e.g.
+# `just run` (most recent crash) or `just run 85253` (specific PID).
+# Use `just list` to see what's available to match against.
 run *args:
-    devenv shell -- uv run crashdbg {{args}}
+    devenv shell -- uv run crashdbg tui {{args}}
+
+# List recent coredumps, e.g. `just list` or `just list Hero_Siege`
+list *args:
+    devenv shell -- uv run crashdbg list {{args}}

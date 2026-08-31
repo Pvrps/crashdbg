@@ -1,5 +1,12 @@
-"""Renders an AnalysisReport with rich. Purely presentational - all the
-generic decoding/interpretation lives in signals.py/journal.py/disasm.py."""
+"""Builds Rich renderables from an AnalysisReport, and renders them as a
+static one-shot report. Purely presentational - all the generic
+decoding/interpretation lives in signals.py/journal.py/disasm.py.
+
+The individual `*_panel`/`*_table` builders below are public (not
+underscore-prefixed) because tui.py reuses them directly to populate its
+tabs - the static report and the interactive TUI are just two different
+arrangements of the exact same Rich renderables.
+"""
 
 from __future__ import annotations
 
@@ -15,7 +22,7 @@ from .models import AnalysisReport
 from .signals import decode_page_fault_error, describe_signal
 
 
-def _header_panel(report: AnalysisReport) -> Panel:
+def header_panel(report: AnalysisReport) -> Panel:
     cd = report.coredump
     name, desc = describe_signal(cd.signal)
     body = Text()
@@ -34,7 +41,7 @@ def _header_panel(report: AnalysisReport) -> Panel:
     return Panel(body, title="Crash", border_style="red")
 
 
-def _fault_panel(report: AnalysisReport) -> Panel | None:
+def fault_panel(report: AnalysisReport) -> Panel | None:
     kf = report.kernel_fault
     if kf is None:
         return Panel(
@@ -73,7 +80,7 @@ def _fault_panel(report: AnalysisReport) -> Panel | None:
     return Panel(body, title="Kernel Fault", border_style="cyan")
 
 
-def _disasm_table(report: AnalysisReport) -> Table | None:
+def disasm_table(report: AnalysisReport) -> Table | None:
     if not report.disasm:
         return None
     table = Table(title="Faulting Instruction (decoded from kernel Code: bytes)")
@@ -96,7 +103,7 @@ def _disasm_table(report: AnalysisReport) -> Table | None:
     return table
 
 
-def _recent_calls_panel(report: AnalysisReport) -> Panel | None:
+def recent_calls_panel(report: AnalysisReport) -> Panel | None:
     if not report.recent_calls:
         return None
     body = Text()
@@ -120,7 +127,7 @@ def _recent_calls_panel(report: AnalysisReport) -> Panel | None:
     )
 
 
-def _crash_function_table(report: AnalysisReport) -> Table | None:
+def crash_function_table(report: AnalysisReport) -> Table | None:
     cf = report.crash_function
     if cf is None:
         return None
@@ -146,7 +153,7 @@ def _crash_function_table(report: AnalysisReport) -> Table | None:
         if instr.call_symbol:
             kind = "plt" if instr.via_plt else "direct"
             text = f"{instr.mnemonic} {instr.call_symbol}  ({kind})"
-        # See _disasm_table: instruction text is plain, not markup - memory
+        # See disasm_table: instruction text is plain, not markup - memory
         # operands like "[rsp+0x10]" would otherwise be silently eaten.
         table.add_row(
             Text(f"{marker}+0x{instr.address - cf.start:x}"),
@@ -157,7 +164,7 @@ def _crash_function_table(report: AnalysisReport) -> Table | None:
     return table
 
 
-def _network_table(report: AnalysisReport) -> Table | None:
+def network_table(report: AnalysisReport) -> Table | None:
     if not report.network_interfaces:
         return None
     table = Table(
@@ -177,7 +184,7 @@ def _network_table(report: AnalysisReport) -> Table | None:
     return table
 
 
-def _backtrace_table(report: AnalysisReport) -> Table:
+def backtrace_table(report: AnalysisReport) -> Table:
     table = Table(title=f"Backtrace (source: {report.backtrace_source})")
     table.add_column("#", justify="right")
     table.add_column("Address", justify="right")
@@ -187,64 +194,71 @@ def _backtrace_table(report: AnalysisReport) -> Table:
         loc = f.location or f.module or ""
         addr = f"0x{f.address:x}" if f.address is not None else ""
         # Function names (esp. demangled C++, e.g. "vector<int>::operator[]")
-        # and paths are plain text, not markup - see _disasm_table.
+        # and paths are plain text, not markup - see disasm_table.
         table.add_row(Text(str(f.index)), Text(addr), Text(f.function), Text(loc))
     return table
 
 
-def _notes_panel(report: AnalysisReport) -> Panel | None:
+def notes_panel(report: AnalysisReport) -> Panel | None:
     if not report.notes:
         return None
     body = Text("\n".join(f"- {n}" for n in report.notes))
     return Panel(body, title="Notes", border_style="magenta")
 
 
-def _commands_panel(report: AnalysisReport) -> Panel | None:
+def commands_panel(report: AnalysisReport) -> Panel | None:
     if not report.commands_used:
         return None
     body = Text("\n".join(report.commands_used), style="dim")
     return Panel(body, title="Commands used (rerun manually if needed)", border_style="grey50")
 
 
+def journal_context_panel(report: AnalysisReport, limit: int = 20) -> Panel | None:
+    if not report.journal_context:
+        return None
+    ctx = Text("\n".join(report.journal_context[-limit:]))
+    return Panel(ctx, title="Journal context (before crash)", border_style="grey50")
+
+
 def render(report: AnalysisReport, console: Console) -> None:
-    console.print(_header_panel(report))
+    console.print(header_panel(report))
 
-    fault_panel = _fault_panel(report)
-    if fault_panel:
-        console.print(fault_panel)
+    fp = fault_panel(report)
+    if fp:
+        console.print(fp)
 
-    disasm_table = _disasm_table(report)
-    if disasm_table:
-        console.print(disasm_table)
+    dt = disasm_table(report)
+    if dt:
+        console.print(dt)
 
-    crash_fn_table = _crash_function_table(report)
-    if crash_fn_table:
-        console.print(crash_fn_table)
+    cft = crash_function_table(report)
+    if cft:
+        console.print(cft)
 
-    calls_panel = _recent_calls_panel(report)
-    if calls_panel:
-        console.print(calls_panel)
+    cp = recent_calls_panel(report)
+    if cp:
+        console.print(cp)
 
-    network_table = _network_table(report)
-    if network_table:
-        console.print(network_table)
+    nt = network_table(report)
+    if nt:
+        console.print(nt)
 
     if report.backtrace:
-        console.print(_backtrace_table(report))
+        console.print(backtrace_table(report))
     else:
         console.print(Panel(Text("No backtrace available.", style="yellow")))
 
-    if report.journal_context:
-        ctx = Text("\n".join(report.journal_context[-20:]))
-        console.print(Panel(ctx, title="Journal context (before crash)", border_style="grey50"))
+    jcp = journal_context_panel(report)
+    if jcp:
+        console.print(jcp)
 
-    notes_panel = _notes_panel(report)
-    if notes_panel:
-        console.print(notes_panel)
+    np = notes_panel(report)
+    if np:
+        console.print(np)
 
-    cmds_panel = _commands_panel(report)
-    if cmds_panel:
-        console.print(cmds_panel)
+    cmp_ = commands_panel(report)
+    if cmp_:
+        console.print(cmp_)
 
     if report.kept_core_path:
         console.print(f"[green]Decompressed core kept at:[/] {report.kept_core_path}")
