@@ -104,9 +104,13 @@ def _recent_calls_panel(report: AnalysisReport) -> Panel | None:
     for i, c in enumerate(report.recent_calls):
         marker = "-> " if i == 0 else "   "
         kind = "plt" if c.via_plt else "direct"
-        body.append(f"{marker}0x{c.address:x}  ", style="bold" if i == 0 else "")
-        body.append(f"call {c.symbol}", style="green bold" if i == 0 else "green")
-        body.append(f"  ({kind}, {c.distance_bytes} bytes before fault)\n", style="dim")
+        style = "dim" if not c.reachable else ("green bold" if i == 0 else "green")
+        body.append(f"{marker}0x{c.address:x}  ", style="bold" if i == 0 and c.reachable else "")
+        body.append(f"call {c.symbol}", style=style)
+        suffix = f"  ({kind}, {c.distance_bytes} bytes before fault)"
+        if not c.reachable:
+            suffix += "  [unreachable branch]"
+        body.append(f"{suffix}\n", style="dim")
     return Panel(
         body, title="Nearest Recognizable Library Call(s) Before Fault", border_style="green"
     )

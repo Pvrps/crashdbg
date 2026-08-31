@@ -83,6 +83,7 @@ class ImportedCall:
     symbol: str
     via_plt: bool
     distance_bytes: int
+    reachable: bool = True
 
 
 @dataclass

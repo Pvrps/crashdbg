@@ -114,6 +114,15 @@ def analyze_cmd(
             "nearest resolvable imported library call.",
         ),
     ] = 0x4000,
+    show_unreachable_calls: Annotated[
+        bool,
+        typer.Option(
+            "--show-unreachable-calls",
+            help="Also show nearby imported calls that a backward control-flow check "
+            "found on a branch that doesn't actually reach the fault (e.g. an untaken "
+            "error-handling path) - hidden by default since they're usually noise.",
+        ),
+    ] = False,
     json_output: Annotated[
         bool, typer.Option("--json", help="Print the report as JSON instead of rich text.")
     ] = False,
@@ -177,14 +186,25 @@ def analyze_cmd(
                 with console.status(
                     "Scanning for nearest imported library call...", spinner="dots"
                 ):
-                    rpt.recent_calls = imports.find_recent_calls(
+                    all_calls = imports.find_recent_calls(
                         exe_path, file_vaddr, window=call_scan_window
                     )
                 rpt.commands_used.append(
                     f"objdump -d -M intel --start-address=0x{max(file_vaddr - call_scan_window, 0):x} "
                     f"--stop-address=0x{file_vaddr:x} {exe_path}"
                 )
-                if not rpt.recent_calls:
+                if show_unreachable_calls:
+                    rpt.recent_calls = all_calls
+                else:
+                    rpt.recent_calls = [c for c in all_calls if c.reachable]
+                    hidden = len(all_calls) - len(rpt.recent_calls)
+                    if hidden:
+                        rpt.notes.append(
+                            f"{hidden} nearby imported call(s) hidden: a backward control-flow "
+                            "check found them on a branch that doesn't reach the fault (e.g. an "
+                            "untaken error-handling path). Use --show-unreachable-calls to see them."
+                        )
+                if not all_calls:
                     rpt.notes.append(
                         f"No exactly-resolvable imported call found within "
                         f"{call_scan_window} bytes before the fault; try a larger --call-scan-window."
