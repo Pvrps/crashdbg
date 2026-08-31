@@ -1,0 +1,31 @@
+[project]
+name = "crashdbg"
+version = "0.1.0"
+description = "Add your description here"
+authors = [
+    { name = "purps", email = "github@purps.ca" }
+]
+requires-python = ">=3.13"
+dependencies = [
+    "typer>=0.15",
+    "rich>=13.7",
+    "capstone>=5.0",
+]
+
+[project.scripts]
+crashdbg = "crashdbg:main"
+
+[build-system]
+requires = ["uv_build>=0.12.5,<0.13.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+extend-select = ["I", "UP"]
