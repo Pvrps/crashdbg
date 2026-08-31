@@ -92,6 +92,26 @@ def _disasm_table(report: AnalysisReport) -> Table | None:
     return table
 
 
+def _recent_calls_panel(report: AnalysisReport) -> Panel | None:
+    if not report.recent_calls:
+        return None
+    body = Text()
+    body.append(
+        "Resolved via the binary's PLT/dynamic symbol table (survives stripping), "
+        "scanning backward from the fault:\n\n",
+        style="dim italic",
+    )
+    for i, c in enumerate(report.recent_calls):
+        marker = "-> " if i == 0 else "   "
+        kind = "plt" if c.via_plt else "direct"
+        body.append(f"{marker}0x{c.address:x}  ", style="bold" if i == 0 else "")
+        body.append(f"call {c.symbol}", style="green bold" if i == 0 else "green")
+        body.append(f"  ({kind}, {c.distance_bytes} bytes before fault)\n", style="dim")
+    return Panel(
+        body, title="Nearest Recognizable Library Call(s) Before Fault", border_style="green"
+    )
+
+
 def _backtrace_table(report: AnalysisReport) -> Table:
     table = Table(title=f"Backtrace (source: {report.backtrace_source})")
     table.add_column("#", justify="right")
@@ -129,6 +149,10 @@ def render(report: AnalysisReport, console: Console) -> None:
     disasm_table = _disasm_table(report)
     if disasm_table:
         console.print(disasm_table)
+
+    calls_panel = _recent_calls_panel(report)
+    if calls_panel:
+        console.print(calls_panel)
 
     if report.backtrace:
         console.print(_backtrace_table(report))

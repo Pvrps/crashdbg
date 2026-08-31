@@ -73,6 +73,19 @@ class DisasmInstr:
 
 
 @dataclass
+class ImportedCall:
+    """A `call` instruction, found while scanning backward from the fault
+    address, that objdump could resolve to an exact (zero-offset) symbol
+    via the binary's PLT/dynamic symbol table - the only kind of symbol
+    that survives `strip` on a dynamically linked binary."""
+
+    address: int
+    symbol: str
+    via_plt: bool
+    distance_bytes: int
+
+
+@dataclass
 class BacktraceFrame:
     index: int
     address: int | None
@@ -88,6 +101,7 @@ class AnalysisReport:
     coredump: CoredumpInfo
     kernel_fault: KernelFault | None = None
     disasm: list[DisasmInstr] = field(default_factory=list)
+    recent_calls: list[ImportedCall] = field(default_factory=list)
     backtrace: list[BacktraceFrame] = field(default_factory=list)
     backtrace_source: str = "none"  # "gdb" | "coredump-message" | "none"
     journal_context: list[str] = field(default_factory=list)
