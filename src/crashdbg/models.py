@@ -73,6 +73,32 @@ class DisasmInstr:
 
 
 @dataclass
+class RawInstr:
+    """One disassembled instruction, as parsed from objdump output."""
+
+    address: int
+    mnemonic: str
+    operand: str
+    target: int | None  # branch/call target address, if applicable
+    call_symbol: str | None  # resolved symbol for calls (exact, zero-offset match only)
+    via_plt: bool
+
+
+@dataclass
+class CrashFunction:
+    """The function containing the fault, recovered from .eh_frame FDEs -
+    no symbol table required. `label` is a synthetic sub_<addr>-style name,
+    never a real recovered symbol."""
+
+    start: int
+    end: int
+    label: str
+    fault_offset: int
+    instructions: list[RawInstr] = field(default_factory=list)
+    truncated: bool = False
+
+
+@dataclass
 class ImportedCall:
     """A `call` instruction, found while scanning backward from the fault
     address, that objdump could resolve to an exact (zero-offset) symbol
@@ -103,6 +129,7 @@ class AnalysisReport:
     kernel_fault: KernelFault | None = None
     disasm: list[DisasmInstr] = field(default_factory=list)
     recent_calls: list[ImportedCall] = field(default_factory=list)
+    crash_function: CrashFunction | None = None
     backtrace: list[BacktraceFrame] = field(default_factory=list)
     backtrace_source: str = "none"  # "gdb" | "coredump-message" | "none"
     journal_context: list[str] = field(default_factory=list)

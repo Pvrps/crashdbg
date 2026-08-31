@@ -6,12 +6,15 @@ Pipeline (mirrors manual coredumpctl + journalctl + gdb triage):
   3. correlate the kernel's 'segfault at ...' line via journalctl, decode the
      page-fault error code generically
   4. disassemble the faulting instruction from the kernel's Code: hint
-  5. scan backward from the fault for the nearest *imported* library call
+  5. recover the crashing function's exact boundaries from .eh_frame (C++
+     exception-unwinding metadata every GCC/Clang binary emits - survives
+     stripping just like the PLT does) and disassemble the whole thing
+  6. scan backward from the fault for the nearest *imported* library call
      objdump can resolve via the binary's PLT/dynamic symbol table - this
      survives stripping, unlike .symtab, so it works with no debug info
-  6. get a symbolized backtrace via gdb (falling back to coredumpctl's own
+  7. get a symbolized backtrace via gdb (falling back to coredumpctl's own
      embedded address-only backtrace if gdb/zstd are unavailable)
-  7. render a report
+  8. render a report
 
 No step assumes anything about which application crashed or why.
 """
@@ -24,9 +27,9 @@ from typing import Annotated
 import typer
 from rich.console import Console
 
-from . import backtrace, coredump, elf, imports, journal, report
+from . import backtrace, coredump, elf, functions, imports, journal, objdump_disasm, report
 from .disasm import disassemble_fault, parse_code_line
-from .models import AnalysisReport
+from .models import AnalysisReport, CrashFunction
 
 app = typer.Typer(
     name="crashdbg",
@@ -123,6 +126,14 @@ def analyze_cmd(
             "error-handling path) - hidden by default since they're usually noise.",
         ),
     ] = False,
+    function_context: Annotated[
+        int,
+        typer.Option(
+            "--function-context",
+            help="Max instructions to show from the crashing function's disassembly, "
+            "centered on the fault, if it's larger than this.",
+        ),
+    ] = 60,
     json_output: Annotated[
         bool, typer.Option("--json", help="Print the report as JSON instead of rich text.")
     ] = False,
@@ -172,44 +183,92 @@ def analyze_cmd(
     else:
         rpt.notes.append("journalctl not found on PATH; skipped kernel fault correlation.")
 
-    # --- nearest resolvable library call before the fault ----------------
-    if rpt.kernel_fault is not None:
+    # --- file-relative fault address (needed by both steps below) --------
+    file_vaddr: int | None = None
+    if rpt.kernel_fault is not None and exe_path is not None:
         kf = rpt.kernel_fault
-        if exe_path is not None and imports.available():
-            file_vaddr = elf.fault_file_vaddr(exe_path, kf.ip, kf.module_ip_offset)
-            if file_vaddr is None:
+        file_vaddr = elf.fault_file_vaddr(exe_path, kf.ip, kf.module_ip_offset)
+        if file_vaddr is None:
+            rpt.notes.append(
+                "Could not determine the binary's ELF type (EXEC vs. PIE); skipped "
+                "function-boundary recovery and nearest-import-call scan since the "
+                "file-relative fault address is unknown."
+            )
+
+    # --- crashing function recovery via .eh_frame (no symbols needed) ----
+    if file_vaddr is not None and exe_path is not None:
+        if functions.available():
+            with console.status(
+                "Recovering crashing function bounds (.eh_frame)...", spinner="dots"
+            ):
+                bounds = functions.find_function_bounds(exe_path, file_vaddr)
+            rpt.commands_used.append(f"readelf --debug-dump=frames {exe_path}")
+            if bounds is None:
                 rpt.notes.append(
-                    "Could not determine the binary's ELF type (EXEC vs. PIE); skipped "
-                    "nearest-import-call scan since the file-relative fault address is unknown."
+                    "No .eh_frame entry covers the fault address (function may lack "
+                    "unwind info); the nearest-import-call scan will use a fixed-size "
+                    "window instead of the exact function bounds."
                 )
             else:
-                with console.status(
-                    "Scanning for nearest imported library call...", spinner="dots"
-                ):
-                    all_calls = imports.find_recent_calls(
-                        exe_path, file_vaddr, window=call_scan_window
-                    )
+                start, end = bounds
+                with console.status("Disassembling crashing function...", spinner="dots"):
+                    instrs = objdump_disasm.disassemble_range(exe_path, start, end)
                 rpt.commands_used.append(
-                    f"objdump -d -M intel --start-address=0x{max(file_vaddr - call_scan_window, 0):x} "
-                    f"--stop-address=0x{file_vaddr:x} {exe_path}"
+                    f"objdump -d -M intel --start-address=0x{start:x} "
+                    f"--stop-address=0x{end:x} {exe_path}"
                 )
-                if show_unreachable_calls:
-                    rpt.recent_calls = all_calls
-                else:
-                    rpt.recent_calls = [c for c in all_calls if c.reachable]
-                    hidden = len(all_calls) - len(rpt.recent_calls)
-                    if hidden:
-                        rpt.notes.append(
-                            f"{hidden} nearby imported call(s) hidden: a backward control-flow "
-                            "check found them on a branch that doesn't reach the fault (e.g. an "
-                            "untaken error-handling path). Use --show-unreachable-calls to see them."
-                        )
-                if not all_calls:
-                    rpt.notes.append(
-                        f"No exactly-resolvable imported call found within "
-                        f"{call_scan_window} bytes before the fault; try a larger --call-scan-window."
+                truncated = False
+                if len(instrs) > function_context:
+                    fault_idx = next(
+                        (i for i, ins in enumerate(instrs) if ins.address == file_vaddr), None
                     )
-        elif not imports.available():
+                    if fault_idx is not None:
+                        before = function_context * 2 // 3
+                        after = function_context - before
+                        lo = max(fault_idx - before, 0)
+                        hi = min(fault_idx + after + 1, len(instrs))
+                        instrs = instrs[lo:hi]
+                        truncated = True
+                rpt.crash_function = CrashFunction(
+                    start=start,
+                    end=end,
+                    label=functions.synthetic_label(start),
+                    fault_offset=file_vaddr - start,
+                    instructions=instrs,
+                    truncated=truncated,
+                )
+        else:
+            rpt.notes.append("readelf not found on PATH; skipped function-boundary recovery.")
+
+    # --- nearest resolvable library call before the fault ----------------
+    if file_vaddr is not None and exe_path is not None:
+        if imports.available():
+            effective_window = call_scan_window
+            if rpt.crash_function is not None:
+                effective_window = file_vaddr - rpt.crash_function.start
+            with console.status("Scanning for nearest imported library call...", spinner="dots"):
+                all_calls = imports.find_recent_calls(exe_path, file_vaddr, window=effective_window)
+            rpt.commands_used.append(
+                f"objdump -d -M intel --start-address=0x{max(file_vaddr - effective_window, 0):x} "
+                f"--stop-address=0x{file_vaddr:x} {exe_path}"
+            )
+            if show_unreachable_calls:
+                rpt.recent_calls = all_calls
+            else:
+                rpt.recent_calls = [c for c in all_calls if c.reachable]
+                hidden = len(all_calls) - len(rpt.recent_calls)
+                if hidden:
+                    rpt.notes.append(
+                        f"{hidden} nearby imported call(s) hidden: a backward control-flow "
+                        "check found them on a branch that doesn't reach the fault (e.g. an "
+                        "untaken error-handling path). Use --show-unreachable-calls to see them."
+                    )
+            if not all_calls:
+                rpt.notes.append(
+                    f"No exactly-resolvable imported call found within "
+                    f"{effective_window} bytes before the fault; try a larger --call-scan-window."
+                )
+        else:
             rpt.notes.append("objdump not found on PATH; skipped nearest-import-call scan.")
 
     # --- journal context ----------------------------------------------

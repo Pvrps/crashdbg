@@ -83,10 +83,14 @@ def _disasm_table(report: AnalysisReport) -> Table | None:
     for instr in report.disasm:
         style = "bold red" if instr.is_fault_instr else None
         marker = "-> " if instr.is_fault_instr else "   "
+        # Instruction text (e.g. "movzx eax, word ptr [rax]") is plain text,
+        # never markup - Table.add_row() would otherwise interpret literal
+        # '[' / ']' in memory operands as (invalid) rich style tags and
+        # silently drop them, so wrap in Text() rather than passing a str.
         table.add_row(
-            f"{marker}0x{instr.address:x}",
-            instr.raw_bytes.hex(" "),
-            f"{instr.mnemonic} {instr.op_str}",
+            Text(f"{marker}0x{instr.address:x}"),
+            Text(instr.raw_bytes.hex(" ")),
+            Text(f"{instr.mnemonic} {instr.op_str}"),
             style=style,
         )
     return table
@@ -116,6 +120,43 @@ def _recent_calls_panel(report: AnalysisReport) -> Panel | None:
     )
 
 
+def _crash_function_table(report: AnalysisReport) -> Table | None:
+    cf = report.crash_function
+    if cf is None:
+        return None
+    size = cf.end - cf.start
+    subtitle = (
+        f"{cf.label} (synthetic name - no real symbol available)  "
+        f"0x{cf.start:x}..0x{cf.end:x}  ({size} bytes)  "
+        f"fault at {cf.label}+0x{cf.fault_offset:x}"
+    )
+    if cf.truncated:
+        subtitle += "  [showing a window around the fault; --function-context to widen]"
+    table = Table(title="Crashing Function (recovered from .eh_frame, no symbols needed)")
+    table.caption = subtitle
+    table.add_column("Offset", justify="right")
+    table.add_column("Address", justify="right")
+    table.add_column("Instruction")
+    fault_addr = cf.start + cf.fault_offset
+    for instr in cf.instructions:
+        is_fault = instr.address == fault_addr
+        marker = "-> " if is_fault else "   "
+        style = "bold red" if is_fault else ("green" if instr.call_symbol else None)
+        text = f"{instr.mnemonic} {instr.operand}".strip()
+        if instr.call_symbol:
+            kind = "plt" if instr.via_plt else "direct"
+            text = f"{instr.mnemonic} {instr.call_symbol}  ({kind})"
+        # See _disasm_table: instruction text is plain, not markup - memory
+        # operands like "[rsp+0x10]" would otherwise be silently eaten.
+        table.add_row(
+            Text(f"{marker}+0x{instr.address - cf.start:x}"),
+            Text(f"0x{instr.address:x}"),
+            Text(text),
+            style=style,
+        )
+    return table
+
+
 def _backtrace_table(report: AnalysisReport) -> Table:
     table = Table(title=f"Backtrace (source: {report.backtrace_source})")
     table.add_column("#", justify="right")
@@ -125,7 +166,9 @@ def _backtrace_table(report: AnalysisReport) -> Table:
     for f in report.backtrace:
         loc = f.location or f.module or ""
         addr = f"0x{f.address:x}" if f.address is not None else ""
-        table.add_row(str(f.index), addr, f.function, loc)
+        # Function names (esp. demangled C++, e.g. "vector<int>::operator[]")
+        # and paths are plain text, not markup - see _disasm_table.
+        table.add_row(Text(str(f.index)), Text(addr), Text(f.function), Text(loc))
     return table
 
 
@@ -153,6 +196,10 @@ def render(report: AnalysisReport, console: Console) -> None:
     disasm_table = _disasm_table(report)
     if disasm_table:
         console.print(disasm_table)
+
+    crash_fn_table = _crash_function_table(report)
+    if crash_fn_table:
+        console.print(crash_fn_table)
 
     calls_panel = _recent_calls_panel(report)
     if calls_panel:
