@@ -18,8 +18,11 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
+from . import wine
 from .models import AnalysisReport
 from .signals import decode_page_fault_error, describe_signal
+from .ue_crash import describe_crash_type
+from .windows_exceptions import parse_error_message
 
 
 def header_panel(report: AnalysisReport) -> Panel:
@@ -28,6 +31,16 @@ def header_panel(report: AnalysisReport) -> Panel:
     body = Text()
     body.append("Executable  ", style="bold")
     body.append(f"{cd.executable or cd.command or '?'}\n")
+    if wine.is_wine_process(cd.executable):
+        target = wine.wine_target(cd.command_line)
+        body.append("Wine target ", style="bold")
+        body.append(f"{target or '(not recoverable from argv)'}", style="cyan")
+        body.append(
+            "  - this is a generic Wine/Proton loader binary, shared by every "
+            "Windows program (games and internal Windows services alike); the "
+            "target above is the actual program that was running.\n",
+            style="dim italic",
+        )
     body.append("PID         ", style="bold")
     body.append(f"{cd.pid}\n")
     body.append("Timestamp   ", style="bold")
@@ -184,6 +197,141 @@ def network_table(report: AnalysisReport) -> Table | None:
     return table
 
 
+def unreal_header_panel(report: AnalysisReport) -> Panel | None:
+    ue = report.unreal_crash
+    if ue is None:
+        return None
+    kind, kind_desc = describe_crash_type(ue)
+    exc = parse_error_message(ue.error_message)
+    kind_style = "red bold" if kind == "Crash" else "yellow bold"
+
+    body = Text()
+    body.append("Game         ", style="bold")
+    body.append(f"{ue.game_name or '?'}\n")
+    body.append("Executable   ", style="bold")
+    body.append(f"{ue.executable_name or '?'}")
+    if ue.build_configuration:
+        body.append(f"  ({ue.build_configuration})")
+    body.append("\n")
+    body.append("Type         ", style="bold")
+    body.append(f"{kind}\n", style=kind_style)
+    body.append("             ")
+    body.append(f"{kind_desc}\n", style="italic")
+    body.append("Error        ", style="bold")
+    body.append(f"{ue.error_message or '(no error message recorded)'}\n", style="red bold")
+    if exc is not None:
+        body.append("             ")
+        body.append(exc.description, style="italic")
+        if exc.is_null_deref:
+            body.append(
+                "  (near-NULL address - almost certainly a null/dangling pointer dereference)",
+                style="red",
+            )
+        body.append("\n")
+    body.append("Engine       ", style="bold")
+    body.append(f"{ue.engine_version or '?'}\n")
+    body.append("Platform     ", style="bold")
+    body.append(f"{ue.platform_full_name or '?'}")
+    if ue.running_under_wine:
+        body.append("  [Unreal Engine detected it's running under Wine]", style="cyan")
+    body.append("\n")
+    if ue.process_id is not None:
+        body.append("Process ID   ", style="bold")
+        body.append(f"{ue.process_id}\n")
+    if ue.crash_time is not None:
+        body.append("Crash time   ", style="bold")
+        body.append(f"{ue.crash_time}\n")
+    if ue.seconds_since_start is not None:
+        body.append("Uptime       ", style="bold")
+        body.append(f"{ue.seconds_since_start:.0f}s since launch\n")
+    body.append("Report       ", style="bold")
+    body.append(f"{ue.report_dir}", style="dim")
+    return Panel(body, title="Unreal Engine Crash Report", border_style="red")
+
+
+def unreal_system_panel(report: AnalysisReport) -> Panel | None:
+    ue = report.unreal_crash
+    if ue is None:
+        return None
+    body = Text()
+    if ue.cpu_brand:
+        body.append("CPU          ", style="bold")
+        body.append(f"{ue.cpu_brand}")
+        if ue.num_cores:
+            body.append(f"  ({ue.num_cores} cores)")
+        body.append("\n")
+    if ue.gpu_adapter_name:
+        body.append("GPU          ", style="bold")
+        body.append(f"{ue.gpu_adapter_name}")
+        if ue.gpu_vendor:
+            body.append(f"  [{ue.gpu_vendor}]")
+        body.append("\n")
+    if ue.rhi_name:
+        body.append("Graphics API ", style="bold")
+        body.append(f"{ue.rhi_name}")
+        if ue.rhi_feature_level:
+            body.append(f"  (feature level {ue.rhi_feature_level})")
+        body.append("\n")
+    if ue.gpu_driver_version:
+        body.append("GPU driver   ", style="bold")
+        body.append(f"{ue.gpu_driver_version}")
+        if ue.gpu_driver_date:
+            body.append(f"  ({ue.gpu_driver_date})")
+        body.append("\n")
+    if ue.total_physical_gb:
+        body.append("RAM          ", style="bold")
+        body.append(f"{ue.total_physical_gb} GB\n")
+    if ue.is_oom:
+        body.append("             ")
+        body.append("Out of memory at crash time\n", style="red bold")
+    if ue.is_with_debug_info is False:
+        body.append("             ")
+        body.append(
+            "No debug symbols in this build - callstack below is module+offset only\n",
+            style="dim italic",
+        )
+    if not body.plain.strip():
+        return None
+    return Panel(body, title="Unreal Engine System Info", border_style="cyan")
+
+
+def unreal_callstack_table(report: AnalysisReport) -> Table | None:
+    ue = report.unreal_crash
+    if ue is None or not ue.callstack:
+        return None
+    crashed = next((t for t in ue.threads if t.is_crashed), None)
+    title = "Unreal Engine Callstack"
+    title += f" (crashing thread: {crashed.name})" if crashed else ""
+    table = Table(title=title)
+    table.caption = "No symbols in Shipping builds - module+offset only, most recent call first"
+    table.add_column("#", justify="right")
+    table.add_column("Module")
+    table.add_column("Offset", justify="right")
+    for i, frame in enumerate(ue.callstack):
+        marker = "-> " if i == 0 else "   "
+        style = "bold red" if i == 0 else None
+        offset = f"+0x{frame.offset:x}" if frame.module != "?" else ""
+        table.add_row(
+            Text(f"{marker}{i}"),
+            Text(frame.module if frame.module != "?" else frame.raw),
+            Text(offset),
+            style=style,
+        )
+    return table
+
+
+def unreal_threads_panel(report: AnalysisReport) -> Panel | None:
+    ue = report.unreal_crash
+    if ue is None or not ue.threads:
+        return None
+    body = Text()
+    body.append(f"{len(ue.threads)} threads were running at crash time.", style="dim")
+    crashed = [t.name for t in ue.threads if t.is_crashed]
+    if crashed:
+        body.append(f" Crashed thread: {', '.join(crashed)}.", style="bold red")
+    return Panel(body, title="Unreal Engine Threads", border_style="grey50")
+
+
 def backtrace_table(report: AnalysisReport) -> Table:
     table = Table(title=f"Backtrace (source: {report.backtrace_source})")
     table.add_column("#", justify="right")
@@ -221,32 +369,51 @@ def journal_context_panel(report: AnalysisReport, limit: int = 20) -> Panel | No
 
 
 def render(report: AnalysisReport, console: Console) -> None:
-    console.print(header_panel(report))
+    if report.coredump is not None:
+        console.print(header_panel(report))
 
-    fp = fault_panel(report)
-    if fp:
-        console.print(fp)
+        fp = fault_panel(report)
+        if fp:
+            console.print(fp)
 
-    dt = disasm_table(report)
-    if dt:
-        console.print(dt)
+    uhp = unreal_header_panel(report)
+    if uhp:
+        console.print(uhp)
 
-    cft = crash_function_table(report)
-    if cft:
-        console.print(cft)
+    usp = unreal_system_panel(report)
+    if usp:
+        console.print(usp)
 
-    cp = recent_calls_panel(report)
-    if cp:
-        console.print(cp)
+    if report.coredump is not None:
+        dt = disasm_table(report)
+        if dt:
+            console.print(dt)
 
-    nt = network_table(report)
-    if nt:
-        console.print(nt)
+        cft = crash_function_table(report)
+        if cft:
+            console.print(cft)
 
-    if report.backtrace:
-        console.print(backtrace_table(report))
-    else:
-        console.print(Panel(Text("No backtrace available.", style="yellow")))
+        cp = recent_calls_panel(report)
+        if cp:
+            console.print(cp)
+
+        nt = network_table(report)
+        if nt:
+            console.print(nt)
+
+    uct = unreal_callstack_table(report)
+    if uct:
+        console.print(uct)
+
+    utp = unreal_threads_panel(report)
+    if utp:
+        console.print(utp)
+
+    if report.coredump is not None:
+        if report.backtrace:
+            console.print(backtrace_table(report))
+        else:
+            console.print(Panel(Text("No backtrace available.", style="yellow")))
 
     jcp = journal_context_panel(report)
     if jcp:
@@ -262,6 +429,12 @@ def render(report: AnalysisReport, console: Console) -> None:
 
     if report.kept_core_path:
         console.print(f"[green]Decompressed core kept at:[/] {report.kept_core_path}")
+
+    if report.unreal_crash and report.unreal_crash.minidump_path:
+        console.print(
+            f"[green]Unreal Engine minidump (Windows format, needs WinDbg/Visual Studio to "
+            f"open):[/] {report.unreal_crash.minidump_path}"
+        )
 
 
 def to_json(report: AnalysisReport) -> str:

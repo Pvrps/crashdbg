@@ -135,8 +135,71 @@ class NetworkInterface:
 
 
 @dataclass
+class UnrealCallFrame:
+    """One frame of an Unreal Engine callstack, resolved the only way UE's
+    own crash reporter can in a Shipping (stripped, no-PDB) build: a module
+    name plus a byte offset from that module's load base - never a real
+    symbol."""
+
+    module: str
+    offset: int
+    raw: str
+
+
+@dataclass
+class UnrealThread:
+    thread_id: int
+    name: str
+    is_crashed: bool
+    callstack: list[str] = field(default_factory=list)
+
+
+@dataclass
+class UnrealCrashReport:
+    """Parsed from an Unreal Engine CrashReportClient report
+    (Saved/Crashes/UECC-*/CrashContext.runtime-xml) - present for any
+    UE3/4/5 game, Windows or Linux-native. This is independent of
+    coredumpctl by design: a Windows game running under Wine/Proton raises
+    a native SEH exception that Wine catches and handles entirely inside
+    itself, so it never produces a Linux signal/coredump - this report is
+    often the *only* record of the crash that exists anywhere on the
+    system."""
+
+    report_dir: Path
+    crash_guid: str | None
+    crash_type: str | None  # UE's own label: "Crash" | "Ensure" | "Assert" | "Stall"
+    is_ensure: bool
+    is_assert: bool
+    is_stall: bool
+    error_message: str
+    game_name: str | None
+    executable_name: str | None
+    build_configuration: str | None
+    engine_version: str | None
+    platform_full_name: str | None
+    running_under_wine: bool | None
+    process_id: int | None
+    seconds_since_start: float | None
+    crash_time: datetime | None
+    cpu_brand: str | None
+    num_cores: int | None
+    total_physical_gb: int | None
+    is_oom: bool
+    gpu_adapter_name: str | None
+    gpu_vendor: str | None
+    gpu_driver_version: str | None
+    gpu_driver_date: str | None
+    rhi_name: str | None
+    rhi_feature_level: str | None
+    is_with_debug_info: bool | None
+    callstack: list[UnrealCallFrame] = field(default_factory=list)
+    threads: list[UnrealThread] = field(default_factory=list)
+    minidump_path: Path | None = None
+
+
+@dataclass
 class AnalysisReport:
-    coredump: CoredumpInfo
+    coredump: CoredumpInfo | None = None
     kernel_fault: KernelFault | None = None
     disasm: list[DisasmInstr] = field(default_factory=list)
     recent_calls: list[ImportedCall] = field(default_factory=list)
@@ -145,6 +208,12 @@ class AnalysisReport:
     network_capture_reason: str | None = None
     backtrace: list[BacktraceFrame] = field(default_factory=list)
     backtrace_source: str = "none"  # "gdb" | "coredump-message" | "none"
+    unreal_crash: UnrealCrashReport | None = None
+    # Whether unreal_crash actually fell within the coredump's correlation
+    # window, vs. being the "most recent report system-wide" fallback shown
+    # when nothing did - see pipeline.py. Presentation layers must check
+    # this before implying any relationship between the two.
+    unreal_crash_correlated: bool = False
     journal_context: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
     commands_used: list[str] = field(default_factory=list)

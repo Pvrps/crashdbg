@@ -1,1 +1,1 @@
-imports: [path:/nix/store/vwlfr19ra3h2lr4ci6ra62c2pnz9jmkg-source/modules/devenv/python]
+imports: [path:/persist/etc/nixos/modules/devenv/python]

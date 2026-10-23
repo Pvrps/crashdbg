@@ -33,6 +33,8 @@ test:
 run *args:
     devenv shell -- uv run crashdbg tui {{args}}
 
-# List recent coredumps, e.g. `just list` or `just list Hero_Siege`
+# List recent coredumps and standalone Unreal Engine crash reports (the
+# latter cover Windows/Proton games whose crashes never produce a Linux
+# coredump at all), e.g. `just list` or `just list Hero_Siege`
 list *args:
     devenv shell -- uv run crashdbg list {{args}}

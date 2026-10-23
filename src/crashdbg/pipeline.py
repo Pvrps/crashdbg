@@ -32,13 +32,25 @@ from pathlib import Path
 
 from rich.console import Console
 
-from . import backtrace, coredump, elf, functions, imports, journal, netstate, objdump_disasm
+from . import (
+    backtrace,
+    coredump,
+    elf,
+    functions,
+    imports,
+    journal,
+    netstate,
+    objdump_disasm,
+    ue_crash,
+    wine,
+)
 from .disasm import disassemble_fault, parse_code_line
 from .models import AnalysisReport, CrashFunction
 
 
 class NoCoredumpFound(RuntimeError):
-    """No coredump matched the given match expression(s)."""
+    """No coredump matched the given match expression(s), and no fallback
+    Unreal Engine crash report was found either."""
 
 
 @dataclass
@@ -50,6 +62,8 @@ class AnalysisOptions:
     call_scan_window: int = 0x4000
     show_unreachable_calls: bool = False
     function_context: int = 60
+    ue_crash_enabled: bool = True
+    ue_crash_window: float = 1800.0
 
 
 def run_analysis(
@@ -62,6 +76,56 @@ def run_analysis(
 
     with console.status("Locating coredump...", spinner="dots"):
         entry = coredump.pick_latest(match)
+
+    # Windows/Proton games' crashes are frequently native Windows SEH
+    # exceptions, handled entirely inside Wine, and never produce a Linux
+    # signal/coredump at all - Unreal Engine's own crash reporter may still
+    # have caught it though. Only relevant when no specific match was
+    # requested (a match expression is inherently coredumpctl-specific, so
+    # there's nothing sensible to fall back to if the user asked for one
+    # and it didn't exist).
+    #
+    # Crucially, this has to compare *timestamps*, not just "does any
+    # coredump exist at all": on any system that's been used for a while,
+    # some old, unrelated coredump (from a completely different program)
+    # will almost always still be sitting around, and would otherwise
+    # permanently shadow a brand new UE-only crash that has no coredump of
+    # its own - defeating this fallback in exactly the case it exists for.
+    if not match and options.ue_crash_enabled:
+        with console.status(
+            "Checking for a more recent Unreal Engine crash report...", spinner="dots"
+        ):
+            ue = ue_crash.find_most_recent_report() if ue_crash.available() else None
+        ue_time = ue_crash.report_time(ue) if ue is not None else None
+        ue_is_newer = ue_time is not None and (
+            entry is None or entry.timestamp is None or ue_time > entry.timestamp
+        )
+        if ue_is_newer:
+            note = (
+                "No Linux coredump was found on this system, but an Unreal Engine "
+                "crash report was."
+                if entry is None
+                else (
+                    "The most recent Unreal Engine crash report is newer than the "
+                    "most recent Linux coredump on this system, so it's shown here "
+                    "instead - the coredump is almost certainly from an unrelated "
+                    "crash."
+                )
+            ) + (
+                " This is typical for Windows/Proton games: their crashes are "
+                "native Windows SEH exceptions, handled entirely inside Wine, and "
+                "never produce a Linux coredump for coredumpctl to see."
+            )
+            return AnalysisReport(
+                coredump=None,
+                unreal_crash=ue,
+                unreal_crash_correlated=False,
+                notes=[note],
+                commands_used=[
+                    "(scanned Steam compatdata for Saved/Crashes/UECC-*; no coredumpctl match)"
+                ],
+            )
+
     if entry is None:
         raise NoCoredumpFound
     commands_used.append(f"coredumpctl list --json=short {' '.join(match or [])}".strip())
@@ -72,6 +136,51 @@ def run_analysis(
 
     rpt = AnalysisReport(coredump=info, commands_used=commands_used)
     exe_path = Path(info.executable) if info.executable else None
+
+    # --- correlated Unreal Engine crash report ----------------------------
+    # Only attempted for coredumps that are actually Wine/Proton processes
+    # (wine-preloader, wineserver, ...) - a Windows/Proton game's *actual*
+    # crash frequently leaves no trace in this coredump at all (see above),
+    # so even a harmless, early SIGSYS from a wine-preloader helper during
+    # Proton bootstrap is worth correlating against. But a coredump from an
+    # unrelated native Linux process (a browser, OBS, ...) has no possible
+    # connection to any Windows game's crash report no matter how close in
+    # time the two happen to be - attempting correlation there produces
+    # confident-looking but meaningless matches.
+    is_wine_coredump = exe_path is not None and wine.is_wine_process(str(exe_path))
+    if options.ue_crash_enabled and is_wine_coredump:
+        if ue_crash.available():
+            with console.status("Checking for Unreal Engine crash reports...", spinner="dots"):
+                ue = ue_crash.find_correlated_report(info.timestamp, options.ue_crash_window)
+                correlated = ue is not None
+                if ue is None:
+                    ue = ue_crash.find_most_recent_report()
+            rpt.unreal_crash = ue
+            rpt.unreal_crash_correlated = correlated
+            if ue is not None:
+                rpt.commands_used.append(
+                    "(scanned Steam compatdata for Saved/Crashes/UECC-* "
+                    f"within \u00b1{options.ue_crash_window:.0f}s of {info.timestamp})"
+                )
+                if correlated and ue.crash_time is not None:
+                    delta = (ue.crash_time - info.timestamp).total_seconds()
+                    rpt.notes.append(
+                        f"Correlated Unreal Engine crash report found ~{abs(delta):.0f}s "
+                        f"{'after' if delta >= 0 else 'before'} this coredump's timestamp "
+                        "(nearest-in-time heuristic - verify it's from the same play "
+                        "session if in doubt)."
+                    )
+                elif not correlated:
+                    rpt.notes.append(
+                        "No Unreal Engine crash report found within "
+                        f"\u00b1{options.ue_crash_window:.0f}s of this coredump; showing "
+                        "the most recent one found system-wide instead, which may be "
+                        "unrelated to this particular coredump."
+                    )
+        else:
+            rpt.notes.append(
+                "No Steam installation found; skipped Unreal Engine crash-report correlation."
+            )
 
     # --- kernel fault correlation -----------------------------------
     if journal.available():
