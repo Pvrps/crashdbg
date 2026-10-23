@@ -2,10 +2,8 @@
 
 Crash triage for native programs on Linux. Point it at a crash and it pulls
 together everything you'd normally dig up by hand with `coredumpctl`,
-`journalctl`, `gdb` and `objdump`, then presents it as one report or an
-interactive TUI.
-
-It's built to be useful even when the crashing binary is stripped and has no
+`journalctl`, `gdb` and `objdump`, then shows it as one report or an
+interactive TUI. It works even when the crashing binary is stripped and has no
 debug symbols, which is the usual case for games and other closed-source apps.
 
 ## What it does
@@ -29,21 +27,26 @@ Given a crash (by PID, process name or executable path), crashdbg:
   backtrace systemd already recorded if gdb isn't available.
 - **Shows surrounding journal logs** from just before the crash.
 
-### Windows games under Wine/Proton
-
-Many Windows games crash inside Wine without producing a Linux coredump at
-all. crashdbg also finds Unreal Engine's own crash reports inside Steam's
-Proton prefixes and game folders, decodes the Windows exception codes, and
-works out which actual Windows program was running behind the generic
-`wine64`/`wine-preloader` process names.
+It also covers **Windows games under Wine/Proton**, which often crash without
+producing a Linux coredump at all. It finds Unreal Engine's own crash reports
+inside Steam's Proton prefixes and game folders, decodes the Windows exception
+codes, and works out which Windows program was actually running behind the
+generic `wine64`/`wine-preloader` process names.
 
 None of this is hardcoded to any specific app. It relies only on standard
 Linux, ELF, Windows and Unreal Engine conventions.
 
-## Usage
+## Requirements
 
-The dev environment uses [devenv](https://devenv.sh) (Nix) and
-[uv](https://docs.astral.sh/uv/). It provides gdb, zstd, binutils and iproute2.
+- Linux on x86-64 with systemd-coredump (for `coredumpctl` and `journalctl`)
+- [devenv](https://devenv.sh) and [just](https://just.systems), which provide
+  Python 3.13, [uv](https://docs.astral.sh/uv/), gdb, zstd, binutils and iproute2
+
+Outside devenv, gdb + zstd (backtraces), `objdump` (function and import-call
+disassembly) and `ip` (network context) are optional. crashdbg skips whatever
+it can't find.
+
+## Usage
 
 ```sh
 just install        # set up the environment and dependencies
@@ -63,10 +66,3 @@ crashdbg tui [MATCH...]              # interactive TUI
 ```
 
 Run `crashdbg <command> --help` to see all options.
-
-## Requirements
-
-- Linux on x86-64 with systemd-coredump (for `coredumpctl` and `journalctl`)
-- Python 3.13+
-- Optional: `gdb` and `zstd` (symbolized backtraces), `objdump` (import-call
-  resolution and function disassembly), `ip` (network interface context)
